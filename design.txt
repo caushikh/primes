@@ -1,0 +1,28 @@
+Main Plan - Use Sieve of Eratosthenes to find the primes
+	- Multiples of prime numbers will be found in parallel
+	- each thread or process will handle its own share of bytes and bits in
+	the entire bitmap
+	- command line option that will allow printing
+	- findMultiple function takes 4 arguments: byte #, startbit #, endbit #,prime #
+	- number array is global variable
+	- prime number finder is master thread, other threads find composites
+	- Prime finding flow:
+		1. Initialize bitmap
+		2. First prime is 2, don't set for primes, set for composites
+		3. for (i = 2; i < sqrt(n);)
+			1. Each thread finds composites in their region of bitmap, sets in bitmap
+			2. After all threads have finished, i = next unset number in bitmap
+		4. All the remaining unset numbers are primes
+	- Happy Prime vs. Sad Prime Flow:
+		1. Each thread is responsible for a certain region of primes in the prime number list
+		2. Each thread does:
+		for each prime
+			1. n = prime
+			2. initialize repeat; (linked list)
+			3. while ( n > 1 && n not in repeat)
+				 1. n = sum of squares of all digits
+				 2. add n to repeat
+			4. return n == 1, number is happy if 1 is returned, 
+			number is sad if 0 is returned
+
+	- Happy/Sad algorithm is from the happy/sad number wikipedia page
