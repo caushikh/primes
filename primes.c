@@ -5,13 +5,44 @@
 
 #include <stdlib.h>
 #include <math.h>
+#include <strings.h>
+
+#define BYTES 100/*536870912*/
+
+struct compFinder {
+	char *nlist;
+	int total;
+	int prime;
+	int threadNo;
+};
 
 int main(int argc, char *argv[])
 {
-	int num = pow(2, 3) - 1;
-	int set = ~(1 << 2);
-	printf("The number is %d.\n", num & set);
+	char *nlist;		/* list of numbers up to max value */
+	char mask[] = { 1 << 7, 1 << 6, 1 << 5, 1 << 4, 1 << 3, 1 << 2, 1 << 1,
+			1 << 0 };
+	
+	int i;
+	int nthreads;
+	
+	if (argc != 2)
+	{
+		printf("Indicate the number of threads.\n");
+	}
 
-
+	nthreads = atoi(argv[1]);
+	nlist = malloc(BYTES);
+	bzero(nlist, BYTES);
+	
+	/* mark the number 1 as special */
+	nlist[1] = nlist[1] | mask[1];
+	if (nlist[1] & mask[1])
+		printf("Number 1 has been marked as special.\n");
+	for (i = 0; i < 8; i++)
+	{
+		printf("%d ", (nlist[i] & mask[i]) > 0);
+	}
+	printf("\n");
+	free(nlist);
 	return 0;
 }
