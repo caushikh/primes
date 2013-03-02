@@ -7,25 +7,33 @@
 #include <math.h>
 #include <strings.h>
 #include <unistd.h>
+#include <pthread.h>
 
-#define BYTES 100/*536870912*/
+#define BYTES 15/*536870912*/
+#define TOTAL BYTES*8-1
 
 struct compFinder {
 	unsigned char *nlist;
-	int total;
+	unsigned char mask[8];
 	int prime;
 	int threadNo;
+	int nthreads;
+	int total;
 };
 
-void printBitMap(unsigned char * nlist, unsigned char mask[8], int start, int end);
+pthread_mutex_t p_mutex = PTHREAD_MUTEX_INITIALIZER; 
+pthread_mutex_t b_mutex[BYTES];
+
+void printBitMap(struct compFinder *, int, int );
+void *findComposites(void *findargs);
 
 int main(int argc, char *argv[])
 {
-	unsigned char *nlist;		/* list of numbers up to max value */
+	//unsigned char *nlist;		/* list of numbers up to max value */
 	unsigned char mask[] = { 1 << 7, 1 << 6, 1 << 5, 1 << 4, 1 << 3, 1 << 2,
 				 1 << 1, 1 << 0 };
-	
 	int i, j, k;
+	long m;
 	int byte, bit;
 	int nthreads;
 	pthread_t *pfinder;
@@ -38,21 +46,37 @@ int main(int argc, char *argv[])
 	}
 
 	nthreads = atoi(argv[1]);
-	nlist = malloc(BYTES);
-	bzero(nlist, BYTES);
+//	nlist = malloc(BYTES);
+//	bzero(nlist, BYTES);
 	pfinder = (pthread_t *) malloc(nthreads * sizeof(pthread_t));
 	cfinder = (struct compFinder *) malloc(sizeof(struct compFinder));
+	cfinder->nlist = (unsigned char *) malloc(BYTES);
+	cfinder->nthreads = atoi(argv[1]);
+	bzero(cfinder->nlist, BYTES);
+	/* initialize byte locks */
+	for (m = 0; m < BYTES; m++)
+	{
+		pthread_mutex_init(&b_mutex[m], NULL);
+	}
+	/* initialize mask */
+	for (i = 0; i < 8; i++)
+	{
+		cfinder->mask[i] = 1 << (8-i-1);
+	}
+
+	cfinder->total = BYTES * 8 - 1;
 	
 	/* mark the number 1 as special */
-	nlist[0] = nlist[0] | mask[1];
+	cfinder->nlist[0] = cfinder->nlist[0] | cfinder->mask[1];
 
 	/* mark all even numbers */
 	for (i = 4; i < BYTES; i += 2)
 	{
 		byte = i / 8;
 		bit = i % 8;
-		nlist[byte] = nlist[byte] | mask[bit];
+		cfinder->nlist[byte] = cfinder->nlist[byte] | cfinder->mask[bit];
 	}
+
 
 	/* perform sieve, mark off composites */
 	for (i = 2; i < sqrt(BYTES);)
@@ -63,7 +87,7 @@ int main(int argc, char *argv[])
 		{
 			byte = j / 8;
 			bit = j % 8;
-			if (!(nlist[byte] & mask[bit]))
+			if (!(cfinder->nlist[byte] & cfinder->mask[bit]))
 			{
 				break;
 			}
@@ -71,16 +95,17 @@ int main(int argc, char *argv[])
 		}
 		if (j >= BYTES)
 			break;
+		cfinder->prime = j;
 
 		/* mark off composites in parallel */
-		for (k = 0, k < nthreads, k++)
+		for (k = 0; k < nthreads; k++)
 		{
 			if (pthread_create(&pfinder[k], NULL, findComposites, (void *)cfinder) != 0)
 			{
 				printf("Threads could not be created.\n");
 				free(pfinder);
+				free(cfinder->nlist);
 				free(cfinder);
-				free(nlist);
 				exit(EXIT_FAILURE);
 			}
 		}
@@ -89,29 +114,61 @@ int main(int argc, char *argv[])
 			pthread_join(pfinder[k], NULL); 
 		i = ++j; 
 	}
-	free(nlist);
+	printBitMap(cfinder, 1, 24);
+
+	free(cfinder->nlist);
 	free(pfinder);
 	free(cfinder);
 	return 0;
 }
 
-void printBitMap(unsigned char *nlist, unsigned char mask[8],  int start, int end)
+void printBitMap(struct compFinder *cfinder,  int start, int end)
 {
 	int i;
+	int byte;
+	int bit;
 	for (i = start; i <= end; i++)
 	{
-		int byte;
-		int bit;
-
 		byte = i / 8;
 		bit = i % 8;
-		printf("%d ", (nlist[byte] & mask[bit]) > 0);
+		printf("%d ", (cfinder->nlist[byte] & cfinder->mask[bit]) > 0);
 	}
 	printf("\n");
 
 }
 
-void *findComposites(void *findargs)
+void *findComposites(void *comp)
 {
+	struct compFinder *compstruct = (struct compFinder *) comp;
+	pthread_mutex_lock(&p_mutex);
+	int temp = compstruct->threadNo;
+	compstruct->threadNo++;
+	pthread_mutex_unlock(&p_mutex);
+	int nmult = compstruct->total / compstruct->prime;
+	long mpert = nmult / compstruct->nthreads;
+	int start = (temp * mpert + 2) * compstruct->prime;
+	int end;
+	int i;
+	int byte;
+	int bit;
+	if (temp == (compstruct->nthreads - 1))
+	{
+		end = nmult * compstruct->prime;
+		printf("end: %d\n", end);
+	}
+	else
+	{
+		end = ((temp + 1) * mpert + 1) * compstruct->prime;
+	}
+	for (i = start; i <= end; i += compstruct->prime)
+	{
+		byte = i / 8;
+		pthread_mutex_lock(&b_mutex[byte]);
+		bit = i % 8;
+		compstruct->nlist[byte] = compstruct->nlist[byte] | compstruct->mask[bit];
+		pthread_mutex_unlock(&b_mutex[byte]);
+	}
+
+
 	return 0;
 }
