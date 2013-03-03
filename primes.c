@@ -8,36 +8,46 @@
 #include <strings.h>
 #include <unistd.h>
 #include <pthread.h>
+#include <semaphore.h>
+#include <sys/types.h>
+#include <stdint.h>
 
-#define BYTES 15/*536870912*/
+#define BYTES 32/*536870912*/
 #define TOTAL BYTES*8-1
 
 struct compFinder {
 	unsigned char *nlist;
 	unsigned char mask[8];
-	int prime;
+	uint32_t prime;
 	int threadNo;
 	int nthreads;
-	int total;
+	uint32_t total;
+	int done;
+	sem_t *find;
+	sem_t *complete;
 };
 
 pthread_mutex_t p_mutex = PTHREAD_MUTEX_INITIALIZER; 
-pthread_mutex_t b_mutex[BYTES];
 
 void printBitMap(struct compFinder *, int, int );
 void *findComposites(void *findargs);
+int getNumPrimes(struct compFinder *cfinder);
+
+static void handler(int sig)
+{
+	
+}
 
 int main(int argc, char *argv[])
 {
-	//unsigned char *nlist;		/* list of numbers up to max value */
-	unsigned char mask[] = { 1 << 7, 1 << 6, 1 << 5, 1 << 4, 1 << 3, 1 << 2,
-				 1 << 1, 1 << 0 };
-	int i, j, k;
-	long m;
-	int byte, bit;
+	uint32_t i, j, k;
+	uint32_t m;
+	uint32_t byte, bit;
 	int nthreads;
 	pthread_t *pfinder;
 	struct compFinder *cfinder;
+	sem_t *find;
+	sem_t *complete;
 	
 	if (argc != 2)
 	{
@@ -46,44 +56,79 @@ int main(int argc, char *argv[])
 	}
 
 	nthreads = atoi(argv[1]);
-//	nlist = malloc(BYTES);
-//	bzero(nlist, BYTES);
+	find = (sem_t *) malloc(nthreads * sizeof(sem_t));
+	complete = (sem_t *) malloc(nthreads * sizeof(sem_t));
 	pfinder = (pthread_t *) malloc(nthreads * sizeof(pthread_t));
 	cfinder = (struct compFinder *) malloc(sizeof(struct compFinder));
 	cfinder->nlist = (unsigned char *) malloc(BYTES);
+	if (cfinder->nlist == NULL)
+	{
+		free(pfinder);
+		free(cfinder);
+		exit(EXIT_FAILURE);
+	}
 	cfinder->nthreads = atoi(argv[1]);
 	bzero(cfinder->nlist, BYTES);
-	/* initialize byte locks */
-	for (m = 0; m < BYTES; m++)
+	
+	for (i = 0; i < nthreads; i++)
 	{
-		pthread_mutex_init(&b_mutex[m], NULL);
+		sem_init(&find[i], 0, 0);
+		sem_init(&complete[i], 0, 0);
 	}
+	cfinder->find = find;
+	cfinder->complete = complete;
+
 	/* initialize mask */
 	for (i = 0; i < 8; i++)
 	{
 		cfinder->mask[i] = 1 << (8-i-1);
 	}
 
-	cfinder->total = BYTES * 8 - 1;
+	cfinder->total =(uint32_t) ((unsigned long)(BYTES) * 8 - 1);
 	
 	/* mark the number 1 as special */
 	cfinder->nlist[0] = cfinder->nlist[0] | cfinder->mask[1];
-
+	
 	/* mark all even numbers */
-	for (i = 4; i < BYTES; i += 2)
+
+	for (i = 4; i < (uint32_t)cfinder->total; i += 2)
 	{
 		byte = i / 8;
 		bit = i % 8;
+		if (i < 10)
+			printf("the message\n");
 		cfinder->nlist[byte] = cfinder->nlist[byte] | cfinder->mask[bit];
+	}
+
+	
+	/* mark off composites in parallel */
+	for (k = 0; k < nthreads; k++)
+	{
+		if (pthread_create(&pfinder[k], NULL, findComposites, (void *)cfinder) != 0)
+		{
+			printf("Threads could not be created.\n");
+			for (i = 0; i < nthreads; i++)
+			{
+				sem_destroy(&find[i]);
+				sem_destroy(&complete[i]);
+			}
+			free(find);
+			free(complete);
+			free(pfinder);
+			free(cfinder->nlist);
+			free(cfinder);
+			exit(EXIT_FAILURE);
+		}
 	}
 
 
 	/* perform sieve, mark off composites */
-	for (i = 2; i < sqrt(BYTES);)
+	for (i = 2; i <= sqrt(cfinder->total);)
 	{
 		/* find first unmarked number */
 		j = i;
-		while(j < BYTES)
+		
+		while(j < cfinder->total)
 		{
 			byte = j / 8;
 			bit = j % 8;
@@ -93,29 +138,42 @@ int main(int argc, char *argv[])
 			}
 			j++;
 		}
-		if (j >= BYTES)
+		if (j >= cfinder->total)
 			break;
 		cfinder->prime = j;
 
-		/* mark off composites in parallel */
+		/* allowing threads now to cross off composites */
+		for(k = 0; k < nthreads; k++)
+			sem_post(&find[k]);
+	
+		/* waiting for all threads to finish before getting next prime 
+		 */
 		for (k = 0; k < nthreads; k++)
-		{
-			if (pthread_create(&pfinder[k], NULL, findComposites, (void *)cfinder) != 0)
-			{
-				printf("Threads could not be created.\n");
-				free(pfinder);
-				free(cfinder->nlist);
-				free(cfinder);
-				exit(EXIT_FAILURE);
-			}
-		}
-
-		for (k = 0; k < nthreads; k++)
-			pthread_join(pfinder[k], NULL); 
+			sem_wait(&complete[k]);
+		if (j == 2)
+			printf("got to 10000\n");
 		i = ++j; 
 	}
-	printBitMap(cfinder, 1, 24);
 
+	cfinder->done = 1;
+
+	/* telling threads to terminate */
+	for(k = 0; k < nthreads; k++)
+		sem_post(&find[k]);
+	
+	for (k = 0; k < nthreads; k++)
+		pthread_join(pfinder[k], NULL); 
+
+//	printBitMap(cfinder, 1, 8000);
+//	printf("There are %d primes.\n", getNumPrimes(cfinder));
+	printf("The program gets here. \n");
+	for (i = 0; i < nthreads; i++)
+	{
+		sem_destroy(&find[i]);
+		sem_destroy(&complete[i]);
+	}
+	free(find);
+	free(complete);
 	free(cfinder->nlist);
 	free(pfinder);
 	free(cfinder);
@@ -124,49 +182,135 @@ int main(int argc, char *argv[])
 
 void printBitMap(struct compFinder *cfinder,  int start, int end)
 {
-	int i;
-	int byte;
-	int bit;
+	uint32_t i;
+	uint32_t byte;
+	uint32_t bit;
 	for (i = start; i <= end; i++)
 	{
 		byte = i / 8;
 		bit = i % 8;
-		printf("%d ", (cfinder->nlist[byte] & cfinder->mask[bit]) > 0);
+		if (!(cfinder->nlist[byte] & cfinder->mask[bit]))
+			printf("%d ", i);
 	}
 	printf("\n");
 
 }
 
+int getNumPrimes(struct compFinder *cfinder)
+{
+	uint32_t i;
+	uint32_t byte;
+	uint32_t bit;
+	uint32_t pcount = 0;
+	for (i = 0; i <= cfinder->total; i++)
+	{
+		byte = i / 8;
+		bit = i % 8;
+		if (!(cfinder->nlist[byte] & cfinder->mask[bit]))
+			pcount++;
+	}
+	return pcount;
+}
+
 void *findComposites(void *comp)
 {
 	struct compFinder *compstruct = (struct compFinder *) comp;
+	uint32_t nmult;
+	uint32_t mpert;
+	int temp;
+	uint32_t i;
+	uint32_t byte, bit;
+	uint32_t start, end;
+	uint32_t prime;
+
+	/* get thread id */
 	pthread_mutex_lock(&p_mutex);
-	int temp = compstruct->threadNo;
+	temp = compstruct->threadNo;
 	compstruct->threadNo++;
 	pthread_mutex_unlock(&p_mutex);
-	int nmult = compstruct->total / compstruct->prime;
-	long mpert = nmult / compstruct->nthreads;
-	int start = (temp * mpert + 2) * compstruct->prime;
-	int end;
-	int i;
-	int byte;
-	int bit;
-	if (temp == (compstruct->nthreads - 1))
+
+	/* wait for signal and get prime */
+	while(1)
 	{
-		end = nmult * compstruct->prime;
-		printf("end: %d\n", end);
-	}
-	else
-	{
-		end = ((temp + 1) * mpert + 1) * compstruct->prime;
-	}
-	for (i = start; i <= end; i += compstruct->prime)
-	{
-		byte = i / 8;
-		pthread_mutex_lock(&b_mutex[byte]);
-		bit = i % 8;
-		compstruct->nlist[byte] = compstruct->nlist[byte] | compstruct->mask[bit];
-		pthread_mutex_unlock(&b_mutex[byte]);
+		sem_wait(&compstruct->find[temp]);
+		if (compstruct->done)
+			break;
+		prime = compstruct->prime;
+		nmult = compstruct->total / prime;
+		mpert = nmult / compstruct->nthreads;
+		
+	
+		if (!mpert)
+		{
+			/* multiples per thread greater than the number of threads */
+			for (i = 0; i < nmult - 1; i++)
+			{
+				if (temp == i)
+				{
+					start = (i + 2) * prime;
+					end = (i + 2) * prime;
+				}
+			}
+		
+			for (i = nmult - 1; i < compstruct->nthreads; i++)
+			{
+				/* for inactive threads just make start arbitrarily
+				   greater than end */
+				if (temp == i)
+				{
+					start = 4;
+					end = 2;
+				}
+			}
+		}
+		else	
+		{	
+			/* set start composite number */
+			if (!temp)
+				start = 2 * prime;
+			else
+			{
+				start = (temp * mpert + 2) * prime;
+				/* set start to first multiple in byte */
+				while (1)
+				{
+					if ( (start / 8) != ((start - prime) / 8))
+					{
+						/* first multiple in byte */
+						break;
+					}
+					start += prime;
+				}
+			}	
+
+			/* set end composite number */	
+			if (temp == (compstruct->nthreads - 1))
+			{
+				end = nmult * prime;
+			}
+			else
+			{
+				end = ((temp + 1) * mpert + 1) * prime;
+				while(1)
+				{
+					/* set end to last multiple of byte */
+					if ( ((end + prime) / 8) != (end / 8))
+					{
+						/* last multiple of byte */
+						break;
+					}
+					end += prime;
+				}
+			}
+		}
+
+		for (i = start; i <= end; i += prime)
+		{
+			byte = i / 8;
+			bit = i % 8;
+			compstruct->nlist[byte] = compstruct->nlist[byte] | compstruct->mask[bit];
+		}
+		sem_post(&compstruct->complete[temp]);
 	}
 
 
