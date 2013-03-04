@@ -11,8 +11,9 @@
 #include <semaphore.h>
 #include <signal.h>
 
-#define BYTES 2/*536870912*/
+#define BYTES 536870912
 #define TOTAL BYTES*8-1
+#define MAX_PROC 8
 
 struct compFinder {
 	unsigned char *nlist;
@@ -22,8 +23,8 @@ struct compFinder {
 	uint32_t nproc;
 	uint32_t total;
 	int done;
-	sem_t *find;
-	sem_t *complete;
+	sem_t find[MAX_PROC];
+	sem_t complete[MAX_PROC];
 };
 
 void printBitMap(struct compFinder *, uint32_t, uint32_t );
@@ -35,6 +36,7 @@ static sem_t *complete = NULL;
 static sem_t *getid = NULL; 
 static void *pstruct = NULL;
 static char *path;
+static uint32_t nproc = 1;
 
 static void mhandler(int sig)
 {
@@ -48,10 +50,17 @@ static void mhandler(int sig)
 
 	if (shm_unlink(path) == -1)
 	{
-		perror("unlink pstruct\n");
+		perror("unlink shared memory\n");
 		exit(EXIT_FAILURE);
 	}
+	
+	for (j = 0; j < nproc; j++)
+		wait(NULL);
+	exit(EXIT_FAILURE);
+}
 
+static void chandler(int sig)
+{
 	exit(EXIT_FAILURE);
 }
 
@@ -91,8 +100,8 @@ int main(int argc, char *argv[])
 	uint32_t i, j, k;
 	uint32_t m;
 	uint32_t byte, bit;
-	uint32_t nproc;
 	struct sigaction msa;
+	struct sigaction csa;
 	uint64_t object_size =  BYTES + 1024*1024;
 
 	/* child variables */
@@ -112,15 +121,20 @@ int main(int argc, char *argv[])
 	
 	/* map shared memory object, allocate into it */
 	nproc = atoi(argv[1]);
+	if (nproc > MAX_PROC)
+	{
+		printf("The process limit is 8.\n");
+		exit(EXIT_FAILURE);
+	}
 	path = "/hari_primes";
 	pstruct = mount_shmem(path, object_size);
 	cfinder = (struct compFinder *) pstruct;
 	bzero(cfinder, sizeof(struct compFinder));
 
 	cfinder->nlist = (unsigned char *) (&cfinder[1]);
-	find = (sem_t *) (&cfinder->nlist[BYTES]);
-	complete = (sem_t *) (&find[nproc]);
-	getid = (sem_t *) (&complete[nproc]);
+	find = &cfinder->find[0];
+	complete = &cfinder->complete[0];
+	getid = (sem_t *) (&cfinder->nlist[BYTES]);
 
 	/* initialize composite finder struct and number list */
 	bzero(cfinder->nlist, BYTES);
@@ -130,18 +144,38 @@ int main(int argc, char *argv[])
 	for (i = 0; i < nproc; i++)
 	{
 		sem_init(&find[i], 1, 0);
-		int a = sem_init(&complete[i], 1, 0);
-		a = sem_trywait(&complete[i]);
-		printf("sem init: %d\n", a);
-
+		sem_init(&complete[i], 1, 0);
 	}
 
 	sem_init(getid, 1, 1);
-	cfinder->find = find;
-	cfinder->complete = complete;
-	int val;
-	sem_getvalue(&complete[0], &val);
-	printf("complete: %d\n", val);
+
+	/* install signal handler */
+	sigemptyset(&msa.sa_mask);
+	msa.sa_flags = 0;
+	msa.sa_handler = mhandler;
+	if (sigaction(SIGINT, &msa, NULL) == -1)
+	{
+		int j;
+		for (j = 0; j < cfinder->nproc; j++)
+		{
+			sem_destroy(&find[j]);
+			sem_destroy(&complete[j]);
+		}
+		sem_destroy(getid);
+	
+		if (shm_unlink(path) == -1)
+		{
+			perror("unlink shared memory\n");
+			exit(EXIT_FAILURE);
+		}
+		
+		for (j = 0; j < nproc; j++)
+			wait(NULL);
+		exit(EXIT_FAILURE);
+
+	}
+
+
 	/* initialize mask */
 	for (i = 0; i < 8; i++)
 	{
@@ -160,7 +194,7 @@ int main(int argc, char *argv[])
 		switch(fork())
 		{
 			case -1:
-		#if 0
+		
 				for (j = 0; j < nproc; j++)
 				{
 					sem_destroy(&find[j]);
@@ -173,13 +207,21 @@ int main(int argc, char *argv[])
 					exit(EXIT_FAILURE);
 					perror("forking");
 				}
-		#endif
+		
 				exit(EXIT_FAILURE);
 				break;
 			case 0: /* child */
-					
+				
+				/* install child signal handler */
+				sigemptyset(&csa.sa_mask);
+				csa.sa_flags = 0;
+				csa.sa_handler = mhandler;
+				if (sigaction(SIGINT, &csa, NULL) == -1)
+				{
+					exit(EXIT_FAILURE);
+				}
+
 				/* get process number */
-				sleep(10);
 				sem_wait(getid);
 				temp = cfinder->procNo;
 				cfinder->procNo++;
@@ -188,9 +230,6 @@ int main(int argc, char *argv[])
 				while(1)
 				{
 					sem_wait(&cfinder->find[temp]);
-	sem_getvalue(&complete[0], &val);
-	printf("child complete: %d\n", val);
-
 					if (cfinder->done)
 						break;
 					prime = cfinder->prime;
@@ -273,7 +312,6 @@ int main(int argc, char *argv[])
 							}
 						}	
 					}
-					printf("Proc no: %u, start: %u, end: %u\n", cfinder->procNo, start, end);
 					for (a = start; a <= end; a += prime)
 					{
 						if (!(a % 2) && prime != 2)
@@ -302,7 +340,6 @@ int main(int argc, char *argv[])
 	{
 		/* find first unmarked number */
 		j = i;
-		printf("i = %d\n", i);		
 		while(j < cfinder->total)
 		{
 			byte = j / 8;
@@ -322,12 +359,8 @@ int main(int argc, char *argv[])
 	
 		/* waiting for all threads to finish before getting next prime 
 		 */
-	sem_getvalue(&complete[0], &val);
-	printf("second parent complete: %d, nproc: %u\n", val, nproc);
-
 		for (k = 0; k < nproc; k++)
 		{
-			printf("trywait: %d\n", sem_trywait(&cfinder->complete[k]));
 			if (sem_wait(&cfinder->complete[k])==-1)
 				perror("error\n");
 		}
@@ -343,8 +376,8 @@ int main(int argc, char *argv[])
 		wait(NULL); 
 
 	/* get number of primes */
-	printBitMap(cfinder, 1, 15);
-	printf("There are %d primes.\n", getNumPrimes(cfinder));
+//	printBitMap(cfinder, 1, 15);
+//	printf("There are %d primes.\n", getNumPrimes(cfinder));
 
 	/* destroy semaphores, delete shared memory object */
 	for (j = 0; j < nproc; j++)

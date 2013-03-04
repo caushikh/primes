@@ -14,7 +14,7 @@
 #include <stdio.h>
 #include <signal.h>
 
-#define BYTES 536870912
+#define BYTES 20/*536870912*/
 #define TOTAL BYTES*8-1
 
 struct compFinder {
@@ -27,11 +27,15 @@ struct compFinder {
 	int done;
 	sem_t *find;
 	sem_t *complete;
+	int happy;
+	int sad;
+	int phappy;
+	int psad;
 };
 
 pthread_mutex_t p_mutex = PTHREAD_MUTEX_INITIALIZER; 
 
-void printBitMap(struct compFinder *, int, int );
+void printBitMap(struct compFinder *, uint32_t, uint32_t );
 void *findComposites(void *findargs);
 int getNumPrimes(struct compFinder *cfinder);
 
@@ -62,8 +66,9 @@ int main(int argc, char *argv[])
 	uint32_t byte, bit;
 	uint32_t nthreads;
 	struct sigaction msa;
+	int opt;
 	
-	if (argc != 2)
+	if (argc < 2)
 	{
 		printf("Indicate the number of threads.\n");
 		exit(EXIT_FAILURE);
@@ -182,15 +187,56 @@ int main(int argc, char *argv[])
 
 	cfinder->done = 1;
 
-	/* telling threads to terminate */
+	/* telling threads to terminate  out of finding primes*/
 	for(k = 0; k < nthreads; k++)
 		sem_post(&find[k]);
-	
+
+	for (k = 0; k < nthreads; k++)
+		sem_wait(&complete[k]);
+
+	/* check what to do next */
+	while ((opt = getopt(argc, argv, "phs")) == 'p')
+	{
+		printBitMap(cfinder, 1, cfinder->total);
+	}
+
+	/* set the proper flags */
+	while (opt != -1)
+	{
+		if (opt == 'h')
+		{
+			printf("happy primes will be found\n");
+			cfinder->happy = 1;
+			if (getopt(argc, argv, "phs") == 'p')
+			{
+				printf("happy primes will be printed \n");
+				cfinder->phappy = 1;
+			}
+		}
+		else if (opt == 's')
+		{
+			printf("sad primes will be found\n");
+			cfinder->sad = 1;
+			if (getopt(argc, argv, "phs") == 'p')
+			{
+				printf("sad primes will be printed\n");
+				cfinder->psad = 1;
+			}
+		}
+		else
+		{
+			printf("we're done \n");
+		}
+		opt = getopt(argc, argv, "phs"); 
+	}
+
+	/* start up threads again after setting flags */
+	for(k = 0; k < nthreads; k++)
+		sem_post(&find[k]);
+
 	for (k = 0; k < nthreads; k++)
 		pthread_join(pfinder[k], NULL); 
 
-//	printBitMap(cfinder, 1, 8000);
-//	printf("There are %d primes.\n", getNumPrimes(cfinder));
 	for (i = 0; i < nthreads; i++)
 	{
 		sem_destroy(&find[i]);
@@ -204,20 +250,19 @@ int main(int argc, char *argv[])
 	return 0;
 }
 
-void printBitMap(struct compFinder *cfinder,  int start, int end)
+void printBitMap(struct compFinder *cfinder,  uint32_t start, uint32_t end)
 {
 	uint32_t i;
 	uint32_t byte;
 	uint32_t bit;
+	printf("Primes from %u to %u:\n", start, end);
 	for (i = start; i <= end; i++)
 	{
 		byte = i / 8;
 		bit = i % 8;
 		if (!(cfinder->nlist[byte] & cfinder->mask[bit]))
-			printf("%d ", i);
+			printf("%d\n", i);
 	}
-	printf("\n");
-
 }
 
 int getNumPrimes(struct compFinder *cfinder)
@@ -355,7 +400,40 @@ void *findComposites(void *comp)
 		}
 		sem_post(&compstruct->complete[temp]);
 	}
+	sem_post(&compstruct->complete[temp]);
 
+	/* happy/sad determination */
+	sem_wait(&compstruct->find[temp]);
+	if (compstruct->happy | compstruct->sad)
+	{
+		/* divide up list of numbers */
+		if (!temp)
+			start = 0;
+		else
+			start = temp * (BYTES / compstruct->nthreads);
+		if (temp == (compstruct->nthreads - 1))
+			end = BYTES - 1;
+		else 
+			end = (temp + 1) * (BYTES / compstruct->nthreads) - 1;
 
+		/* iterate through prime numbers in region */
+		for (byte = start; byte <= end; byte++)
+		{
+			for (bit = 0; bit < 8; bit++)
+			{
+				i = 8 * byte + bit;
+				if (!(compstruct->nlist[byte] & compstruct->mask[bit]))
+					printf("%d is a prime.\n", i);
+			}
+		}
+		if (cfinder->phappy)
+		{
+
+		}
+		if (cfinder->psad)
+		{
+
+		}
+	}
 	return 0;
 }
