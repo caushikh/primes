@@ -10,6 +10,7 @@
 #include <strings.h>
 #include <semaphore.h>
 #include <signal.h>
+#include "listbag.h"
 
 #define BYTES 536870912
 #define TOTAL BYTES*8-1
@@ -25,10 +26,15 @@ struct compFinder {
 	int done;
 	sem_t find[MAX_PROC];
 	sem_t complete[MAX_PROC];
+	int happy;
+	int sad;
+	int phappy;
+	int psad;
 };
 
 void printBitMap(struct compFinder *, uint32_t, uint32_t );
 int getNumPrimes(struct compFinder *cfinder);
+uint32_t calcInterm(char *buf);
 
 static struct compFinder *cfinder = NULL;
 static sem_t *find = NULL;
@@ -48,14 +54,14 @@ static void mhandler(int sig)
 	}
 	sem_destroy(getid);
 
+	for (j = 0; j < nproc; j++)
+		wait(NULL);
+
 	if (shm_unlink(path) == -1)
 	{
 		perror("unlink shared memory\n");
 		exit(EXIT_FAILURE);
 	}
-	
-	for (j = 0; j < nproc; j++)
-		wait(NULL);
 	exit(EXIT_FAILURE);
 }
 
@@ -103,6 +109,7 @@ int main(int argc, char *argv[])
 	struct sigaction msa;
 	struct sigaction csa;
 	uint64_t object_size =  BYTES + 1024*1024;
+	int opt;
 
 	/* child variables */
 	uint32_t nmult;
@@ -113,7 +120,7 @@ int main(int argc, char *argv[])
 	uint32_t start, end;
 	uint32_t prime;
 
-	if (argc != 2)
+	if (argc < 2)
 	{
 		printf("Indicate the number of threads.\n");
 		exit(EXIT_FAILURE);
@@ -163,14 +170,15 @@ int main(int argc, char *argv[])
 		}
 		sem_destroy(getid);
 	
+		for (j = 0; j < nproc; j++)
+			wait(NULL);
+
 		if (shm_unlink(path) == -1)
 		{
 			perror("unlink shared memory\n");
 			exit(EXIT_FAILURE);
 		}
 		
-		for (j = 0; j < nproc; j++)
-			wait(NULL);
 		exit(EXIT_FAILURE);
 
 	}
@@ -215,7 +223,7 @@ int main(int argc, char *argv[])
 				/* install child signal handler */
 				sigemptyset(&csa.sa_mask);
 				csa.sa_flags = 0;
-				csa.sa_handler = mhandler;
+				csa.sa_handler = chandler;
 				if (sigaction(SIGINT, &csa, NULL) == -1)
 				{
 					exit(EXIT_FAILURE);
@@ -328,6 +336,64 @@ int main(int argc, char *argv[])
 					}
 					sem_post(&cfinder->complete[temp]);
 				}
+				sem_post(&cfinder->complete[temp]);
+
+				/* happy/sad determination */
+				sem_wait(&cfinder->find[temp]);
+				if (cfinder->happy | cfinder->sad)
+				{
+					/* divide up list of numbers */
+					struct bag *hcheck = (struct bag *) malloc(sizeof(struct bag));
+					char buf[33];
+					if (!temp)
+						start = 0;
+					else
+						start = temp * (BYTES / cfinder->nproc);
+					if (temp == (cfinder->nproc - 1))
+						end = BYTES - 1;
+					else 
+						end = (temp + 1) * (BYTES / cfinder->nproc) - 1;
+
+					/* iterate through prime numbers in region */
+					for (cbyte = start; cbyte <= end; cbyte++)
+					{
+						for (cbit = 0; cbit < 8; cbit++)
+						{
+							i = 8 * cbyte + cbit;
+						/* algorithm similar to that shown in 
+						   wikipedia page on happy/sad primes */
+							if (!(cfinder->nlist[cbyte] & cfinder->mask[cbit]))
+							{
+								prime = i;
+								initBag(hcheck);
+								addToBag(hcheck, 0);
+								while ((i > 1) && (!bagContains(hcheck,i)))
+								{
+									addToBag(hcheck, i);
+									sprintf(&buf[0], "%u", i);
+									i = calcInterm(&buf[0]);
+
+								}
+								if (i == 1 && cfinder->phappy)
+								{
+									printf("happy: %u\n", prime);
+								}
+
+								else if (i != 1 && cfinder->psad)
+								{
+									if (i)	/* i != 0 */
+										printf("sad: %u\n", prime);
+								}
+								else {
+								}
+
+								freeBag(hcheck);	
+							}
+						}
+					}
+					free(hcheck);
+				}
+
 				exit(EXIT_SUCCESS);
 				break;
 			default:
@@ -355,13 +421,13 @@ int main(int argc, char *argv[])
 		cfinder->prime = j;
 		/* allowing threads now to cross off composites */
 		for(k = 0; k < nproc; k++)
-			sem_post(&cfinder->find[k]);
+			sem_post(&find[k]);
 	
 		/* waiting for all threads to finish before getting next prime 
 		 */
 		for (k = 0; k < nproc; k++)
 		{
-			if (sem_wait(&cfinder->complete[k])==-1)
+			if (sem_wait(&complete[k])==-1)
 				perror("error\n");
 		}
 		i = ++j; 
@@ -371,13 +437,52 @@ int main(int argc, char *argv[])
 	/* telling processes to terminate */
 	for(k = 0; k < nproc; k++)
 		sem_post(&find[k]);
-	
+
+	for (k = 0; k < nproc; k++)
+		sem_wait(&complete[k]);
+
+	/* check what to do next */
+	while ((opt = getopt(argc, argv, "phs")) == 'p')
+	{
+		printBitMap(cfinder, 1, cfinder->total);
+	}
+
+	/* set the proper flags */
+	while (opt != -1)
+	{
+		if (opt == 'h')
+		{
+			printf("happy primes will be found\n");
+			cfinder->happy = 1;
+			if (getopt(argc, argv, "phs") == 'p')
+			{
+				printf("happy primes will be printed \n");
+				cfinder->phappy = 1;
+			}
+		}
+		else if (opt == 's')
+		{
+			printf("sad primes will be found\n");
+			cfinder->sad = 1;
+			if (getopt(argc, argv, "phs") == 'p')
+			{
+				printf("sad primes will be printed\n");
+				cfinder->psad = 1;
+			}
+		}
+		else
+		{
+			printf("we're done \n");
+		}
+		opt = getopt(argc, argv, "phs"); 
+	}
+
+	/* start up processes again after setting flags */
+	for(k = 0; k < nproc; k++)
+		sem_post(&find[k]);
+
 	for (k = 0; k < nproc; k++)
 		wait(NULL); 
-
-	/* get number of primes */
-//	printBitMap(cfinder, 1, 15);
-//	printf("There are %d primes.\n", getNumPrimes(cfinder));
 
 	/* destroy semaphores, delete shared memory object */
 	for (j = 0; j < nproc; j++)
@@ -405,10 +510,8 @@ void printBitMap(struct compFinder *cfinder,  uint32_t start, uint32_t end)
 		byte = i / 8;
 		bit = i % 8;
 		if (!(cfinder->nlist[byte] & cfinder->mask[bit]))
-			printf("%d ", i);
+			printf("%d\n", i);
 	}
-	printf("\n");
-
 }
 
 int getNumPrimes(struct compFinder *cfinder)
@@ -427,3 +530,22 @@ int getNumPrimes(struct compFinder *cfinder)
 	return pcount;
 }
 
+uint32_t calcInterm(char *buf)
+{
+	int i;
+	int len;
+	char tempbuf[2];
+	uint32_t count = 0;
+	uint32_t temp = 0;
+
+	tempbuf[1] = '\0';
+	len = strlen(buf);
+	for (i = 0; i < len; i++)
+	{
+		tempbuf[0] = buf[i];
+		temp = (uint32_t)atol(tempbuf);
+		temp = temp * temp;
+		count += temp;
+	}
+	return count;
+}

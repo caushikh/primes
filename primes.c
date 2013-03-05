@@ -13,6 +13,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <signal.h>
+#include "listbag.h"
 
 #define BYTES 20/*536870912*/
 #define TOTAL BYTES*8-1
@@ -38,6 +39,7 @@ pthread_mutex_t p_mutex = PTHREAD_MUTEX_INITIALIZER;
 void printBitMap(struct compFinder *, uint32_t, uint32_t );
 void *findComposites(void *findargs);
 int getNumPrimes(struct compFinder *cfinder);
+uint32_t calcInterm(char *buf);
 
 static pthread_t *pfinder = NULL;
 static struct compFinder *cfinder = NULL;
@@ -407,6 +409,8 @@ void *findComposites(void *comp)
 	if (compstruct->happy | compstruct->sad)
 	{
 		/* divide up list of numbers */
+		struct bag *hcheck = (struct bag *) malloc(sizeof(struct bag));
+		char buf[33];
 		if (!temp)
 			start = 0;
 		else
@@ -416,24 +420,65 @@ void *findComposites(void *comp)
 		else 
 			end = (temp + 1) * (BYTES / compstruct->nthreads) - 1;
 
+		printf("thread no: %d, start: %u, end: %u\n", temp, start, end);
 		/* iterate through prime numbers in region */
 		for (byte = start; byte <= end; byte++)
 		{
 			for (bit = 0; bit < 8; bit++)
 			{
 				i = 8 * byte + bit;
+				/* algorithm similar to that shown in 
+				   wikipedia page on happy/sad primes */
 				if (!(compstruct->nlist[byte] & compstruct->mask[bit]))
-					printf("%d is a prime.\n", i);
+				{
+					prime = i;
+					initBag(hcheck);
+					addToBag(hcheck, 0);
+					while ((i > 1) && (!bagContains(hcheck,i)))
+					{
+						addToBag(hcheck, i);
+						sprintf(&buf[0], "%u", i);
+						i = calcInterm(&buf[0]);
+
+					}
+					if (i == 1 && compstruct->phappy)
+					{
+						printf("happy: %u\n", prime);
+					}
+
+					else if (i != 1 && compstruct->psad)
+					{
+						if (i)	/* i != 0 */
+							printf("sad: %u\n", prime);
+					}
+					else {
+					}
+
+					freeBag(hcheck);	
+				}
 			}
 		}
-		if (cfinder->phappy)
-		{
-
-		}
-		if (cfinder->psad)
-		{
-
-		}
+		free(hcheck);
 	}
 	return 0;
+}
+
+uint32_t calcInterm(char *buf)
+{
+	int i;
+	int len;
+	char tempbuf[2];
+	uint32_t count = 0;
+	uint32_t temp = 0;
+
+	tempbuf[1] = '\0';
+	len = strlen(buf);
+	for (i = 0; i < len; i++)
+	{
+		tempbuf[0] = buf[i];
+		temp = (uint32_t)atol(tempbuf);
+		temp = temp * temp;
+		count += temp;
+	}
+	return count;
 }
